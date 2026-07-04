@@ -61,12 +61,14 @@ vendored core).
 
 ## Non-obvious constraints
 
-- **Fixed 640×1136 resolution.** Every pixel constant (dot x-range, crop bounds,
-  OCR regions, the bundled `mask_scaled.png`) assumes an iPhone SE/8-class Oura
-  screenshot. `validate_dimensions()` *rejects* other sizes (±4px tolerance)
-  rather than silently producing wrong data. Re-tuning for another device means
-  changing constants in `core.py` and `image_helpers.py` plus regenerating the
-  mask.
+- **Two supported resolutions: 640×1136 (iPhone SE/8) and 864×1939 (Pixel 9).**
+  All pixel constants live in `DeviceProfile` instances in `core.py`; the profile
+  is auto-selected by resolution. `validate_dimensions()` *rejects* other sizes
+  (±4px tolerance) rather than silently producing wrong data. iPhone uses a
+  bundled `mask_scaled.png` to suppress noise; Pixel 9 uses a brightness filter
+  instead (`min_dot_brightness=160.0`) because data dots are near-white (~238)
+  while zone-separator artifacts are ~70–150. Adding a new device means adding a
+  new `DeviceProfile` to `_PROFILES` in `core.py` — no other files need changing.
 
 - **The extractor core is vendored from the larger *daystar* project.** The
   golden test (`test_golden_matches_daystar_cli`) pins this copy's output to

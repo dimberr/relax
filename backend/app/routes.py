@@ -24,9 +24,9 @@ logger = logging.getLogger("oura_extractor")
 router = APIRouter(prefix="/api")
 
 MASK_PATH = str(Path(__file__).parent / "extractor" / "mask_scaled.png")
-# A 640x1136 Oura screenshot is ~250-300 KB; 1 MB is generous headroom and keeps
-# queued uploads from adding up to much memory. Caddy enforces the same cap at
-# the edge so oversized bodies never reach Python.
+# Oura screenshots are 250–500 KB (640×1136 iPhone, 864×1939 Pixel 9); 1 MB is
+# generous headroom. Caddy enforces the same cap at the edge so oversized bodies
+# never reach Python.
 MAX_UPLOAD_BYTES = 1 * 1024 * 1024
 
 # OCR is CPU-bound and synchronous; cap how many run at once so a burst of

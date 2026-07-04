@@ -14,11 +14,61 @@ from app.extractor.core import (
     ExtractionError,
     decode_image,
     extract_from_array,
+    stress_score_for_y,
     validate_dimensions,
+    _PIXEL9_PROFILE,
+    _IPHONE_PROFILE,
 )
 from app.main import app
 
 MASK_PATH = str(Path(__file__).parents[1] / "app" / "extractor" / "mask_scaled.png")
+
+
+def test_stress_score_zone_boundaries():
+    """Zone band edges land at exactly 100/75/50/25/0 on both device profiles."""
+    for profile in (_PIXEL9_PROFILE, _IPHONE_PROFILE):
+        z = profile.zones
+        assert stress_score_for_y(z["stressed"][0], profile) == 100.0
+        assert stress_score_for_y(z["stressed"][1], profile) == 75.0
+        assert stress_score_for_y(z["engaged"][1], profile) == 50.0
+        assert stress_score_for_y(z["relaxed"][1], profile) == 25.0
+        assert stress_score_for_y(z["restored"][1], profile) == 0.0
+
+
+def test_stress_score_midpoints():
+    """Zone midpoints land at 87.5 / 62.5 / 37.5 / 12.5."""
+    for profile in (_PIXEL9_PROFILE, _IPHONE_PROFILE):
+        z = profile.zones
+        for zone_name, expected_mid in [
+            ("stressed", 87.5),
+            ("engaged", 62.5),
+            ("relaxed", 37.5),
+            ("restored", 12.5),
+        ]:
+            y0, y1 = z[zone_name]
+            mid_y = (y0 + y1) // 2
+            score = stress_score_for_y(mid_y, profile)
+            assert abs(score - expected_mid) <= 0.5, (
+                f"{profile.name} {zone_name} midpoint: got {score}, expected ~{expected_mid}"
+            )
+
+
+def test_stress_score_zone_membership():
+    """Every score for a dot in zone X falls in that zone's 25-pt band."""
+    for profile in (_PIXEL9_PROFILE, _IPHONE_PROFILE):
+        expected_ranges = {
+            "stressed": (75.0, 100.0),
+            "engaged": (50.0, 75.0),
+            "relaxed": (25.0, 50.0),
+            "restored": (0.0, 25.0),
+        }
+        for zone_name, (lo, hi) in expected_ranges.items():
+            y0, y1 = profile.zones[zone_name]
+            for y in range(y0, y1 + 1):
+                score = stress_score_for_y(y, profile)
+                assert lo <= score <= hi, (
+                    f"{profile.name} y={y} zone={zone_name}: score {score} outside [{lo},{hi}]"
+                )
 SAMPLE_DATE = datetime.date(2026, 2, 10)
 
 
@@ -30,6 +80,30 @@ def test_golden_matches_daystar_cli(sample_png_bytes, golden_rows):
 
     got = [(p["timestamp"].replace("T", " "), p["zone"]) for p in result["points"]]
     assert got == golden_rows
+
+
+PIXEL9_DATE = datetime.date(2026, 4, 27)
+
+
+def test_pixel9_matches_baseline(pixel9_png_bytes, pixel9_baseline_rows):
+    """Pin the Pixel 9 extractor output (zone + stress_score) against drift.
+
+    This is a self-baseline, not an independent oracle: daystar never handled
+    Pixel 9, so it captures current known-good behavior. Regenerate the fixture
+    CSV deliberately (and review the diff) if extraction logic legitimately
+    changes — don't edit it just to make this pass.
+    """
+    img = decode_image(pixel9_png_bytes)
+    # Pixel 9 uses a brightness filter, not the mask, but extract_from_array
+    # takes the mask path unconditionally (ignored for non-mask profiles).
+    result = extract_from_array(img, MASK_PATH, PIXEL9_DATE)
+
+    got = [
+        (p["timestamp"].replace("T", " "), p["zone"], str(p["stress_score"]))
+        for p in result["points"]
+    ]
+    assert got == pixel9_baseline_rows
+    assert result["meta"]["device"] == "Pixel 9"
 
 
 def test_decode_rejects_garbage():
@@ -64,12 +138,29 @@ def test_guard_reads_real_dimensions():
 
 
 def test_validate_dimensions_accepts_expected():
-    validate_dimensions(np.zeros((1136, 640, 3), np.uint8))  # should not raise
+    # iPhone profile
+    profile = validate_dimensions(np.zeros((1136, 640, 3), np.uint8))
+    assert profile.name == "iPhone SE/8"
+    # Pixel 9 profile
+    profile = validate_dimensions(np.zeros((1939, 864, 3), np.uint8))
+    assert profile.name == "Pixel 9"
 
 
 def test_validate_dimensions_rejects_wrong_size():
     with pytest.raises(ExtractionError):
         validate_dimensions(np.zeros((800, 600, 3), np.uint8))
+
+
+def test_parse_time_24h_clamps_garbled_minute():
+    """A garbled OCR minute (e.g. '8:99') must not raise; it's clamped to 0–59."""
+    from app.extractor.ocr_helpers import parse_time_string
+
+    ref = datetime.date(2026, 4, 27)
+    dt = parse_time_string("8:99", ref, time_24h=True)
+    assert (dt.hour, dt.minute) == (8, 59)
+    # Sanity: a normal 24h value is unaffected.
+    dt2 = parse_time_string("18:27", ref, time_24h=True)
+    assert (dt2.hour, dt2.minute) == (18, 27)
 
 
 # ---- API -----------------------------------------------------------------

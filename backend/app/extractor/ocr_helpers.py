@@ -10,11 +10,6 @@ import cv2
 import pytesseract
 
 
-# Time axis label region
-TIME_AXIS_Y_MIN = 780
-TIME_AXIS_Y_MAX = 825
-
-
 def configure_tesseract(cmd=None):
     """Point pytesseract at the Tesseract binary.
 
@@ -59,16 +54,18 @@ def extract_time_from_region(img, x_start, x_end, y_start, y_end, debug=True):
     if debug:
         cv2.imwrite(f"debug_ocr_{x_start}_{x_end}.png", region_clean)
 
-    config = "--psm 7 -c tessedit_char_whitelist=0123456789:apm "
+    config = "--psm 6 -c tessedit_char_whitelist=0123456789:apm "
     text = pytesseract.image_to_string(region_clean, config=config).strip()
 
     return text
 
 
-def parse_time_string(time_str, reference_date):
-    """
-    Parse time string like '2:27 pm', '5:08 am', '6 am', or '6am' into a datetime object.
-    Handles common OCR errors like 'O' for '0', '|' for '1', etc.
+def parse_time_string(time_str, reference_date, time_24h=False):
+    """Parse time string into a datetime object.
+
+    Handles 12h format (iPhone): '2:27 pm', '5:08 am', '6 am'
+    Handles 24h format (Pixel 9): '8:27', '18', '23:57'
+    Corrects common OCR errors ('O'→'0', '|'→'1', etc).
     """
     if isinstance(reference_date, date) and not isinstance(reference_date, datetime):
         reference_date = datetime.combine(reference_date, datetime.min.time())
@@ -79,6 +76,21 @@ def parse_time_string(time_str, reference_date):
     time_str = time_str.replace("o", "0").replace("O", "0")
     time_str = time_str.replace("l", "1").replace("I", "1")
     time_str = time_str.replace("|", "1")
+
+    if time_24h:
+        # 24h format: "8:27", "18", "23:57"
+        # Clamp obviously-garbled values (e.g. "33:57" → "23:57" can't be fixed
+        # safely here, so we trust the OCR and rely on midnight-crossing logic)
+        m = re.search(r"(\d{1,2})(?:[:\.](\d{2}))?", time_str)
+        if m:
+            hour = int(m.group(1))
+            minute = int(m.group(2)) if m.group(2) else 0
+            hour = max(0, min(hour, 23))
+            minute = max(0, min(minute, 59))
+            return reference_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        raise ValueError(f"Could not parse 24h time string: '{time_str}'")
+
+    # 12h format (original iPhone path)
     time_str = time_str.replace("pm", " pm").replace("am", " am")
 
     patterns = [
@@ -141,47 +153,52 @@ def round_down_to_15min(dt):
     )
 
 
-def extract_times_from_chart(img, reference_date, debug=True):
+def extract_times_from_chart(img, reference_date, profile, debug=True):
     """
     Extract start and end times from the chart's time axis.
-    
+
+    Uses profile to locate the correct OCR regions and parse format (12h vs 24h).
+
     Handles Oura's edge cases:
     1. Late-night start (≥11 PM): x-axis shows previous day, data starts at midnight
     2. Early-morning end (<8 AM): chart may span into the day AFTER the given date
-    
+
     Returns:
         (first_time, last_time) as datetime objects
     """
     left_text = extract_time_from_region(
-        img, 20, 160, TIME_AXIS_Y_MIN, TIME_AXIS_Y_MAX, debug=debug
+        img,
+        profile.ocr_left_x_start, profile.ocr_left_x_end,
+        profile.ocr_y_min, profile.ocr_y_max,
+        debug=debug,
     )
     print(f"  Left label OCR: '{left_text}'")
 
     right_text = extract_time_from_region(
-        img, 450, 640, TIME_AXIS_Y_MIN, TIME_AXIS_Y_MAX, debug=debug
+        img,
+        profile.ocr_right_x_start, profile.ocr_right_x_end,
+        profile.ocr_y_min, profile.ocr_y_max,
+        debug=debug,
     )
     print(f"  Right label OCR: '{right_text}'")
 
-    first_time = parse_time_string(left_text, reference_date)
-    
+    first_time = parse_time_string(left_text, reference_date, profile.time_24h)
+
     # EDGE CASE 1: Late-night start (11 PM or later)
-    # Oura shows x-axis starting from previous day
     if first_time.hour >= 23:
         print(f"  ⚠️  Detected late-night start time ({first_time.hour}:xx) - adjusting reference date back by 1 day")
         adjusted_reference = reference_date - timedelta(days=1)
-        first_time = parse_time_string(left_text, adjusted_reference)
-        last_time = parse_time_string(right_text, adjusted_reference)
+        first_time = parse_time_string(left_text, adjusted_reference, profile.time_24h)
+        last_time = parse_time_string(right_text, adjusted_reference, profile.time_24h)
         print(f"  ✓ Adjusted: first_time now on {first_time.date()}, last_time on {last_time.date()}")
     else:
-        last_time = parse_time_string(right_text, reference_date)
+        last_time = parse_time_string(right_text, reference_date, profile.time_24h)
 
     # Handle midnight crossing
     if last_time < first_time:
         last_time = last_time + timedelta(days=1)
-    
+
     # EDGE CASE 2: Early-morning end (<8 AM) with late-night start
-    # Chart may span TWO midnights (e.g., 11 PM on day 1 to 6 AM on day 3)
-    # Check if the span seems too short (< 12 hours) despite crossing midnight
     if first_time.hour >= 23 and last_time.hour < 8:
         span_hours = (last_time - first_time).total_seconds() / 3600
         if span_hours < 12:

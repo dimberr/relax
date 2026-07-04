@@ -5,23 +5,10 @@ from datetime import timedelta
 import cv2
 import numpy as np
 
-
-# Zone definitions
-ZONES = {
-    "stressed": (260, 374),
-    "engaged": (375, 486),
-    "relaxed": (487, 596),
-    "restored": (597, 724),
-}
-
-# Mask parameters
-MASK_THRESHOLD = 50
-DILATE_KERNEL_SIZE = 5
-DILATE_ITERATIONS = 2
-
-# Crop bounds
-Y_MIN = 260
-Y_MAX = 724
+# Mask parameters (iPhone only)
+_MASK_THRESHOLD = 50
+_DILATE_KERNEL_SIZE = 5
+_DILATE_ITERATIONS = 2
 
 
 def load_precise_mask(mask_path, target_shape):
@@ -32,51 +19,55 @@ def load_precise_mask(mask_path, target_shape):
 
     mask_img = cv2.resize(mask_img, (target_shape[1], target_shape[0]))
     mask_gray = cv2.cvtColor(mask_img, cv2.COLOR_BGR2GRAY)
-    _, mask_binary = cv2.threshold(mask_gray, MASK_THRESHOLD, 255, cv2.THRESH_BINARY)
+    _, mask_binary = cv2.threshold(mask_gray, _MASK_THRESHOLD, 255, cv2.THRESH_BINARY)
 
     mask_text = cv2.bitwise_not(mask_binary)
-    kernel = np.ones((DILATE_KERNEL_SIZE, DILATE_KERNEL_SIZE), np.uint8)
-    mask_text_dilated = cv2.dilate(mask_text, kernel, iterations=DILATE_ITERATIONS)
-    final_mask = cv2.bitwise_not(mask_text_dilated)
-
-    return final_mask
+    kernel = np.ones((_DILATE_KERNEL_SIZE, _DILATE_KERNEL_SIZE), np.uint8)
+    mask_text_dilated = cv2.dilate(mask_text, kernel, iterations=_DILATE_ITERATIONS)
+    return cv2.bitwise_not(mask_text_dilated)
 
 
-def preprocess_array(screenshot, mask_path):
-    """Apply mask, crop, and preprocess an already-decoded BGR image array.
+def preprocess_array(screenshot, mask_path, profile):
+    """Apply mask (if any), crop to chart area, and preprocess.
 
-    Shares its logic with load_and_preprocess so the CLI (path-based) and the
-    web API (bytes/array-based) produce identical results.
+    mask_path=None skips masking (used for Pixel 9 which has no bundled mask).
+    profile supplies y_min/y_max crop bounds and device-specific HoughCircles
+    parameters so the blur step is shared with detect_dots.
     """
-    mask = load_precise_mask(mask_path, screenshot.shape)
-    masked_screenshot = cv2.bitwise_and(screenshot, screenshot, mask=mask)
-    cropped = masked_screenshot[Y_MIN:Y_MAX, :]
+    if mask_path is not None:
+        mask = load_precise_mask(mask_path, screenshot.shape)
+        masked = cv2.bitwise_and(screenshot, screenshot, mask=mask)
+    else:
+        mask = None
+        masked = screenshot
+
+    cropped = masked[profile.y_min:profile.y_max, :]
     gray = cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (3, 3), 0)
 
-    return screenshot, masked_screenshot, mask, blur
+    return screenshot, masked, mask, blur
 
 
-def load_and_preprocess(image_path, mask_path):
+def load_and_preprocess(image_path, mask_path, profile):
     """Load image from disk, apply mask, crop, preprocess."""
     screenshot = cv2.imread(image_path)
     if screenshot is None:
         raise FileNotFoundError(f"Could not load image: {image_path}")
 
-    return preprocess_array(screenshot, mask_path)
+    return preprocess_array(screenshot, mask_path, profile)
 
 
-def detect_dots(blur):
-    """Detect circular dots using HoughCircles."""
+def detect_dots(blur, profile):
+    """Detect circular dots using HoughCircles with profile-specific radii."""
     circles = cv2.HoughCircles(
         blur,
         cv2.HOUGH_GRADIENT,
         dp=1.0,
-        minDist=8,
+        minDist=profile.hough_min_dist,
         param1=40,
         param2=10,
-        minRadius=3,
-        maxRadius=8,
+        minRadius=profile.hough_min_radius,
+        maxRadius=profile.hough_max_radius,
     )
 
     if circles is None:
@@ -87,35 +78,9 @@ def detect_dots(blur):
     return circles
 
 
-def calculate_timestamp_from_x(x_pos, first_dot_x, last_dot_x, first_dot_time, last_dot_time):
-    """Calculate timestamp based on x-position using linear interpolation."""
-    total_seconds = (last_dot_time - first_dot_time).total_seconds()
-    x_range = last_dot_x - first_dot_x
-    x_offset = x_pos - first_dot_x
-    time_offset_seconds = (x_offset / x_range) * total_seconds
-
-    timestamp = first_dot_time + timedelta(seconds=time_offset_seconds)
-
-    total_minutes = timestamp.hour * 60 + timestamp.minute
-    rounded_minutes = round(total_minutes / 15) * 15
-
-    if rounded_minutes >= 24 * 60:
-        rounded_minutes -= 24 * 60
-        timestamp = timestamp + timedelta(days=1)
-
-    timestamp = timestamp.replace(
-        hour=rounded_minutes // 60,
-        minute=rounded_minutes % 60,
-        second=0,
-        microsecond=0,
-    )
-
-    return timestamp
-
-
-def zone_for_y(y):
-    """Return zone name for a given y-coordinate."""
-    for zone, (ymin, ymax) in ZONES.items():
+def zone_for_y(y, profile):
+    """Return zone name for a given y-coordinate using the device profile's zone map."""
+    for zone, (ymin, ymax) in profile.zones.items():
         if ymin <= y <= ymax:
             return zone
     return "unknown"

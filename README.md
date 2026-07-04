@@ -28,7 +28,12 @@ Click **Download CSV** to save the results.
 |Device|Resolution|Status|
 |---|---|---|
 |iPhone SE (2020)|640×1136|Supported|
+|Google Pixel 9|864×1939|Supported|
 |Others|—|Need screenshots|
+
+Example Pixel 9 Daytime Stress screenshot (a supported input):
+
+![Pixel 9 Daytime Stress screenshot](backend/tests/fixtures/stress_chart_pixel9_2026-04-27.png)
 
 ## Contribute a Screenshot (Help Add Device Support)
 
@@ -51,10 +56,12 @@ This helps expand support to more devices.
 ### ⚠️ Fixed-resolution assumption
 
 All the pixel geometry (dot x-range, crop bounds, OCR regions, the bundled mask)
-assumes a **640×1136** screenshot (Oura on an iPhone SE/8-class device). Uploads of
-other sizes are **rejected** rather than silently producing a wrong table. If you
-capture on a different device, the constants in `backend/app/extractor/core.py` 
-and `image_helpers.py` need re-tuning.
+is resolution-specific and lives in a `DeviceProfile` per supported device
+(currently **640×1136** iPhone SE/8 and **864×1939** Pixel 9), auto-selected by
+the screenshot's dimensions. Uploads of other sizes are **rejected** rather than
+silently producing a wrong table. Adding a device means adding a new
+`DeviceProfile` to `_PROFILES` in `backend/app/extractor/core.py` — see the
+"Contribute a Screenshot" section above.
 
 ## Documentation
 
@@ -184,7 +191,7 @@ layer.
 
 | field          | type   | notes                                  |
 | -------------- | ------ | -------------------------------------- |
-| `file`         | file   | PNG/JPEG screenshot, 640×1136          |
+| `file`         | file   | PNG/JPEG screenshot, 640×1136 or 864×1939 |
 | `date`         | string | `YYYY-MM-DD`, the day the chart covers |
 | `include_image`| bool   | return annotated chart as base64 PNG   |
 
